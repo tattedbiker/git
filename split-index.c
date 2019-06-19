@@ -1,4 +1,5 @@
 #include "cache.h"
+#include "json-writer.h"
 #include "split-index.h"
 #include "ewah/ewok.h"
 
@@ -16,6 +17,7 @@ int read_link_extension(struct index_state *istate,
 {
 	const unsigned char *data = data_;
 	struct split_index *si;
+	unsigned long original_sz = sz;
 	int ret;
 
 	if (sz < the_hash_algo->rawsz)
@@ -25,7 +27,7 @@ int read_link_extension(struct index_state *istate,
 	data += the_hash_algo->rawsz;
 	sz -= the_hash_algo->rawsz;
 	if (!sz)
-		return 0;
+		goto done;
 	si->delete_bitmap = ewah_new();
 	ret = ewah_read_mmap(si->delete_bitmap, data, sz);
 	if (ret < 0)
@@ -38,6 +40,15 @@ int read_link_extension(struct index_state *istate,
 		return error("corrupt replace bitmap in link extension");
 	if (ret != sz)
 		return error("garbage at the end of link extension");
+done:
+	if (istate->jw) {
+		jw_object_inline_begin_object(istate->jw, "split-index");
+		jw_object_string(istate->jw, "oid", oid_to_hex(&si->base_oid));
+		jw_object_ewah(istate->jw, "delete-bitmap", si->delete_bitmap);
+		jw_object_ewah(istate->jw, "replace-bitmap", si->replace_bitmap);
+		jw_object_intmax(istate->jw, "ext-size", original_sz);
+		jw_end(istate->jw);
+	}
 	return 0;
 }
 
