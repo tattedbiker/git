@@ -4,6 +4,7 @@
 struct repo_settings {
 	char core_commit_graph;
 	char gc_write_commit_graph;
+	int index_version;
 };
 
 struct repository;
