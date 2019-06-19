@@ -1914,7 +1914,7 @@ struct index_entry_offset_table
 static struct index_entry_offset_table *read_ieot_extension(const char *mmap, size_t mmap_size, size_t offset);
 static void write_ieot_extension(struct strbuf *sb, struct index_entry_offset_table *ieot);
 
-static size_t read_eoie_extension(const char *mmap, size_t mmap_size);
+static size_t read_eoie_extension(const char *mmap, size_t mmap_size, struct json_writer *jw);
 static void write_eoie_extension(struct strbuf *sb, git_hash_ctx *eoie_context, size_t offset);
 
 struct load_index_extensions
@@ -2243,10 +2243,12 @@ int do_read_index(struct index_state *istate, const char *path, int must_exist)
 		 * debugging only, so performance is not a concern.
 		 */
 		nr_threads = 1;
+		/* and dump EOIE extension even with threading off */
+		read_eoie_extension(mmap, mmap_size, istate->jw);
 	}
 
 	if (nr_threads > 1) {
-		extension_offset = read_eoie_extension(mmap, mmap_size);
+		extension_offset = read_eoie_extension(mmap, mmap_size, NULL);
 		if (extension_offset) {
 			int err;
 
@@ -3504,7 +3506,8 @@ int should_validate_cache_entries(void)
 #define EOIE_SIZE (4 + GIT_SHA1_RAWSZ) /* <4-byte offset> + <20-byte hash> */
 #define EOIE_SIZE_WITH_HEADER (4 + 4 + EOIE_SIZE) /* <4-byte signature> + <4-byte length> + EOIE_SIZE */
 
-static size_t read_eoie_extension(const char *mmap, size_t mmap_size)
+static size_t read_eoie_extension(const char *mmap, size_t mmap_size,
+				  struct json_writer *jw)
 {
 	/*
 	 * The end of index entries (EOIE) extension is guaranteed to be last
@@ -3548,6 +3551,12 @@ static size_t read_eoie_extension(const char *mmap, size_t mmap_size)
 		return 0;
 	index += sizeof(uint32_t);
 
+	if (jw) {
+		jw_object_inline_begin_object(jw, "end-of-index");
+		jw_object_intmax(jw, "offset", offset);
+		jw_object_intmax(jw, "ext-size", extsize);
+		jw_object_inline_begin_array(jw, "extensions");
+	}
 	/*
 	 * The hash is computed over extension types and their sizes (but not
 	 * their contents).  E.g. if we have "TREE" extension that is N-bytes
@@ -3576,8 +3585,23 @@ static size_t read_eoie_extension(const char *mmap, size_t mmap_size)
 
 		the_hash_algo->update_fn(&c, mmap + src_offset, 8);
 
+		if (jw) {
+			char name[5];
+
+			jw_array_inline_begin_object(jw);
+			memcpy(name, mmap + src_offset, 4);
+			name[4] = '\0';
+			jw_object_string(jw, "name",  name);
+			jw_object_intmax(jw, "size", extsize);
+			jw_end(jw);
+		}
+
 		src_offset += 8;
 		src_offset += extsize;
+	}
+	if (jw) {
+		jw_end(jw);	/* extensions */
+		jw_end(jw);	/* end-of-index */
 	}
 	the_hash_algo->final_fn(hash, &c);
 	if (!hasheq(hash, (const unsigned char *)index))
