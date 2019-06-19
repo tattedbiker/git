@@ -1708,7 +1708,7 @@ static int read_index_extension(struct index_state *istate,
 			return -1;
 		break;
 	case CACHE_EXT_UNTRACKED:
-		istate->untracked = read_untracked_extension(data, sz);
+		istate->untracked = read_untracked_extension(data, sz, istate->jw);
 		break;
 	case CACHE_EXT_FSMONITOR:
 		read_fsmonitor_extension(istate, data, sz);
