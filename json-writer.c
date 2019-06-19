@@ -202,6 +202,22 @@ void jw_object_null(struct json_writer *jw, const char *key)
 	strbuf_addstr(&jw->json, "null");
 }
 
+void jw_object_stat_data(struct json_writer *jw, const char *name,
+			 const struct stat_data *sd)
+{
+	jw_object_inline_begin_object(jw, name);
+	jw_object_intmax(jw, "st_ctime.sec", sd->sd_ctime.sec);
+	jw_object_intmax(jw, "st_ctime.nsec", sd->sd_ctime.nsec);
+	jw_object_intmax(jw, "st_mtime.sec", sd->sd_mtime.sec);
+	jw_object_intmax(jw, "st_mtime.nsec", sd->sd_mtime.nsec);
+	jw_object_intmax(jw, "st_dev", sd->sd_dev);
+	jw_object_intmax(jw, "st_ino", sd->sd_ino);
+	jw_object_intmax(jw, "st_uid", sd->sd_uid);
+	jw_object_intmax(jw, "st_gid", sd->sd_gid);
+	jw_object_intmax(jw, "st_size", sd->sd_size);
+	jw_end(jw);
+}
+
 static void increase_indent(struct strbuf *sb,
 			    const struct json_writer *jw,
 			    int indent)
