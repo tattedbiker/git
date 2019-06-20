@@ -1304,7 +1304,7 @@ test_expect_success 'rebase -i respects rebase.missingCommitsCheck = ignore' '
 		actual
 '
 
-cat >expect <<EOF
+q_to_cr >expect <<EOF
 Warning: some commits may have been dropped accidentally.
 Dropped commits (newer to older):
  - $(git rev-list --pretty=oneline --abbrev-commit -1 master)
@@ -1313,24 +1313,15 @@ To avoid this message, use "drop" to explicitly remove a commit.
 Use 'git config rebase.missingCommitsCheck' to change the level of warnings.
 The possible behaviours are: ignore, warn, error.
 
-Rebasing (1/4)
-Rebasing (2/4)
-Rebasing (3/4)
-Rebasing (4/4)
-Successfully rebased and updated refs/heads/missing-commit.
+Rebasing (1/4)QRebasing (2/4)QRebasing (3/4)QRebasing (4/4)QQ                                                                                QSuccessfully rebased and updated refs/heads/missing-commit.
 EOF
-
-cr_to_nl () {
-	tr '\015' '\012'
-}
 
 test_expect_success 'rebase -i respects rebase.missingCommitsCheck = warn' '
 	test_config rebase.missingCommitsCheck warn &&
 	rebase_setup_and_clean missing-commit &&
 	set_fake_editor &&
 	FAKE_LINES="1 2 3 4" \
-		git rebase -i --root 2>actual.2 &&
-	cr_to_nl <actual.2 >actual &&
+		git rebase -i --root 2>actual &&
 	test_i18ncmp expect actual &&
 	test D = $(git cat-file commit HEAD | sed -ne \$p)
 '
