@@ -309,7 +309,7 @@ test_unset_prereq () {
 }
 
 test_set_prereq () {
-	if test -n "$GIT_TEST_FAIL_PREREQS"
+	if test -n "$GIT_TEST_FAIL_PREREQS_INTERNAL"
 	then
 		case "$1" in
 		# The "!" case is handled below with
