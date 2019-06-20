@@ -43,6 +43,9 @@ int cmd_env__helper(int argc, const char **argv, const char *prefix)
 		usage_with_options(env__helper_usage, opts);
 
 	switch (cmdmode) {
+	default:
+		BUG("wrong cmdmode");
+		break;
 	case ENV_HELPER_BOOL:
 		tmp_int = strtol(env_default, (char **)&env_default, 10);
 		if (*env_default) {
