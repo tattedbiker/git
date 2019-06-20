@@ -1,4 +1,5 @@
 #include "cache.h"
+#include "ewah/ewok.h"
 #include "json-writer.h"
 
 void jw_init(struct json_writer *jw)
@@ -200,6 +201,35 @@ void jw_object_null(struct json_writer *jw, const char *key)
 {
 	object_common(jw, key);
 	strbuf_addstr(&jw->json, "null");
+}
+
+void jw_object_stat_data(struct json_writer *jw, const char *name,
+			 const struct stat_data *sd)
+{
+	jw_object_inline_begin_object(jw, name);
+	jw_object_intmax(jw, "st_ctime.sec", sd->sd_ctime.sec);
+	jw_object_intmax(jw, "st_ctime.nsec", sd->sd_ctime.nsec);
+	jw_object_intmax(jw, "st_mtime.sec", sd->sd_mtime.sec);
+	jw_object_intmax(jw, "st_mtime.nsec", sd->sd_mtime.nsec);
+	jw_object_intmax(jw, "st_dev", sd->sd_dev);
+	jw_object_intmax(jw, "st_ino", sd->sd_ino);
+	jw_object_intmax(jw, "st_uid", sd->sd_uid);
+	jw_object_intmax(jw, "st_gid", sd->sd_gid);
+	jw_object_intmax(jw, "st_size", sd->sd_size);
+	jw_end(jw);
+}
+
+static void dump_ewah_one(size_t pos, void *jw)
+{
+	jw_array_intmax(jw, pos);
+}
+
+void jw_object_ewah(struct json_writer *jw, const char *key,
+		    struct ewah_bitmap *ewah)
+{
+	jw_object_inline_begin_array(jw, key);
+	ewah_each_bit(ewah, dump_ewah_one, jw);
+	jw_end(jw);
 }
 
 static void increase_indent(struct strbuf *sb,

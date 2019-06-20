@@ -26,6 +26,7 @@
 #include "thread-utils.h"
 #include "progress.h"
 #include "repo-settings.h"
+#include "json-writer.h"
 
 /* Mask for the name length in ce_flags in the on-disk index */
 
@@ -1699,17 +1700,17 @@ static int read_index_extension(struct index_state *istate,
 {
 	switch (CACHE_EXT(ext)) {
 	case CACHE_EXT_TREE:
-		istate->cache_tree = cache_tree_read(data, sz);
+		istate->cache_tree = cache_tree_read(data, sz, istate->jw);
 		break;
 	case CACHE_EXT_RESOLVE_UNDO:
-		istate->resolve_undo = resolve_undo_read(data, sz);
+		istate->resolve_undo = resolve_undo_read(data, sz, istate->jw);
 		break;
 	case CACHE_EXT_LINK:
 		if (read_link_extension(istate, data, sz))
 			return -1;
 		break;
 	case CACHE_EXT_UNTRACKED:
-		istate->untracked = read_untracked_extension(data, sz);
+		istate->untracked = read_untracked_extension(data, sz, istate->jw);
 		break;
 	case CACHE_EXT_FSMONITOR:
 		read_fsmonitor_extension(istate, data, sz);
@@ -1922,10 +1923,10 @@ struct index_entry_offset_table
 	struct index_entry_offset entries[FLEX_ARRAY];
 };
 
-static struct index_entry_offset_table *read_ieot_extension(const char *mmap, size_t mmap_size, size_t offset);
+static struct index_entry_offset_table *read_ieot_extension(const char *mmap, size_t mmap_size, size_t offset, struct json_writer *jw);
 static void write_ieot_extension(struct strbuf *sb, struct index_entry_offset_table *ieot);
 
-static size_t read_eoie_extension(const char *mmap, size_t mmap_size);
+static size_t read_eoie_extension(const char *mmap, size_t mmap_size, struct json_writer *jw);
 static void write_eoie_extension(struct strbuf *sb, git_hash_ctx *eoie_context, size_t offset);
 
 struct load_index_extensions
@@ -1964,6 +1965,50 @@ static void *load_index_extensions(void *_data)
 	return NULL;
 }
 
+static void dump_cache_entry(struct index_state *istate,
+			     int index,
+			     unsigned long offset,
+			     const struct cache_entry *ce)
+{
+	struct strbuf sb = STRBUF_INIT;
+	struct json_writer *jw = istate->jw;
+
+	jw_array_inline_begin_object(jw);
+
+	/*
+	 * this is technically redundant, but it's for easier
+	 * navigation when there hundreds of entries
+	 */
+	jw_object_intmax(jw, "id", index);
+
+	jw_object_string(jw, "name", ce->name);
+
+	strbuf_addf(&sb, "%06o", ce->ce_mode);
+	jw_object_string(jw, "mode", sb.buf);
+	strbuf_release(&sb);
+
+	jw_object_intmax(jw, "flags", ce->ce_flags);
+	/*
+	 * again redundant info, just so you don't have to decode
+	 * flags values manually
+	 */
+	if (ce->ce_flags & CE_VALID)
+		jw_object_true(jw, "assume-unchanged");
+	if (ce->ce_flags & CE_INTENT_TO_ADD)
+		jw_object_true(jw, "intent-to-add");
+	if (ce->ce_flags & CE_SKIP_WORKTREE)
+		jw_object_true(jw, "skip-worktree");
+	if (ce_stage(ce))
+		jw_object_intmax(jw, "stage", ce_stage(ce));
+
+	jw_object_string(jw, "oid", oid_to_hex(&ce->oid));
+
+	jw_object_stat_data(jw, "stat", &ce->ce_stat_data);
+	jw_object_intmax(jw, "file-offset", offset);
+
+	jw_end(jw);
+}
+
 /*
  * A helper function that will load the specified range of cache entries
  * from the memory mapped file and add them to the given index.
@@ -1984,6 +2029,9 @@ static unsigned long load_cache_entry_block(struct index_state *istate,
 		ce = create_from_disk(ce_mem_pool, istate->version, disk_ce, &consumed, previous_ce);
 		set_index_entry(istate, i, ce);
 
+		if (istate->jw)
+			dump_cache_entry(istate, i, src_offset, ce);
+
 		src_offset += consumed;
 		previous_ce = ce;
 	}
@@ -1995,6 +2043,8 @@ static unsigned long load_all_cache_entries(struct index_state *istate,
 {
 	unsigned long consumed;
 
+	jw_object_inline_begin_array_gently(istate->jw, "entries");
+
 	if (istate->version == 4) {
 		mem_pool_init(&istate->ce_mem_pool,
 				estimate_cache_size_from_compressed(istate->cache_nr));
@@ -2005,6 +2055,8 @@ static unsigned long load_all_cache_entries(struct index_state *istate,
 
 	consumed = load_cache_entry_block(istate, istate->ce_mem_pool,
 					0, istate->cache_nr, mmap, src_offset, NULL);
+
+	jw_end_gently(istate->jw);
 	return consumed;
 }
 
@@ -2132,6 +2184,7 @@ int do_read_index(struct index_state *istate, const char *path, int must_exist)
 	size_t extension_offset = 0;
 	int nr_threads, cpus;
 	struct index_entry_offset_table *ieot = NULL;
+	int jw_pretty = 1;
 
 	if (istate->initialized)
 		return istate->cache_nr;
@@ -2166,6 +2219,8 @@ int do_read_index(struct index_state *istate, const char *path, int must_exist)
 	istate->cache_nr = ntohl(hdr->hdr_entries);
 	istate->cache_alloc = alloc_nr(istate->cache_nr);
 	istate->cache = xcalloc(istate->cache_alloc, sizeof(*istate->cache));
+	istate->timestamp.sec = st.st_mtime;
+	istate->timestamp.nsec = ST_MTIME_NSEC(st);
 	istate->initialized = 1;
 
 	p.istate = istate;
@@ -2188,8 +2243,29 @@ int do_read_index(struct index_state *istate, const char *path, int must_exist)
 	if (!HAVE_THREADS)
 		nr_threads = 1;
 
+	if (istate->jw) {
+		size_t off;
+
+		jw_object_begin(istate->jw, jw_pretty);
+		jw_object_intmax(istate->jw, "version", istate->version);
+		jw_object_string(istate->jw, "oid", oid_to_hex(&istate->oid));
+		jw_object_intmax(istate->jw, "st_mtime.sec", istate->timestamp.sec);
+		jw_object_intmax(istate->jw, "st_mtime.nsec", istate->timestamp.nsec);
+
+		/*
+		 * Threading may mess up json writing. This is for
+		 * debugging only, so performance is not a concern.
+		 */
+		nr_threads = 1;
+		/* and dump EOIE/IOET extensions even with threading off */
+		off = read_eoie_extension(mmap, mmap_size, istate->jw);
+		if (off)
+			free(read_ieot_extension(mmap, mmap_size,
+						 off, istate->jw));
+	}
+
 	if (nr_threads > 1) {
-		extension_offset = read_eoie_extension(mmap, mmap_size);
+		extension_offset = read_eoie_extension(mmap, mmap_size, NULL);
 		if (extension_offset) {
 			int err;
 
@@ -2207,7 +2283,7 @@ int do_read_index(struct index_state *istate, const char *path, int must_exist)
 	 * to multi-thread the reading of the cache entries.
 	 */
 	if (extension_offset && nr_threads > 1)
-		ieot = read_ieot_extension(mmap, mmap_size, extension_offset);
+		ieot = read_ieot_extension(mmap, mmap_size, extension_offset, NULL);
 
 	if (ieot) {
 		src_offset += load_cache_entries_threaded(istate, mmap, mmap_size, nr_threads, ieot);
@@ -2216,8 +2292,6 @@ int do_read_index(struct index_state *istate, const char *path, int must_exist)
 		src_offset += load_all_cache_entries(istate, mmap, mmap_size, src_offset);
 	}
 
-	istate->timestamp.sec = st.st_mtime;
-	istate->timestamp.nsec = ST_MTIME_NSEC(st);
 
 	/* if we created a thread, join it otherwise load the extensions on the primary thread */
 	if (extension_offset) {
@@ -2228,6 +2302,8 @@ int do_read_index(struct index_state *istate, const char *path, int must_exist)
 		p.src_offset = src_offset;
 		load_index_extensions(&p);
 	}
+	jw_end_gently(istate->jw);
+
 	munmap((void *)mmap, mmap_size);
 
 	/*
@@ -3447,7 +3523,8 @@ int should_validate_cache_entries(void)
 #define EOIE_SIZE (4 + GIT_SHA1_RAWSZ) /* <4-byte offset> + <20-byte hash> */
 #define EOIE_SIZE_WITH_HEADER (4 + 4 + EOIE_SIZE) /* <4-byte signature> + <4-byte length> + EOIE_SIZE */
 
-static size_t read_eoie_extension(const char *mmap, size_t mmap_size)
+static size_t read_eoie_extension(const char *mmap, size_t mmap_size,
+				  struct json_writer *jw)
 {
 	/*
 	 * The end of index entries (EOIE) extension is guaranteed to be last
@@ -3491,6 +3568,12 @@ static size_t read_eoie_extension(const char *mmap, size_t mmap_size)
 		return 0;
 	index += sizeof(uint32_t);
 
+	if (jw) {
+		jw_object_inline_begin_object(jw, "end-of-index");
+		jw_object_intmax(jw, "offset", offset);
+		jw_object_intmax(jw, "ext-size", extsize);
+		jw_object_inline_begin_array(jw, "extensions");
+	}
 	/*
 	 * The hash is computed over extension types and their sizes (but not
 	 * their contents).  E.g. if we have "TREE" extension that is N-bytes
@@ -3519,8 +3602,23 @@ static size_t read_eoie_extension(const char *mmap, size_t mmap_size)
 
 		the_hash_algo->update_fn(&c, mmap + src_offset, 8);
 
+		if (jw) {
+			char name[5];
+
+			jw_array_inline_begin_object(jw);
+			memcpy(name, mmap + src_offset, 4);
+			name[4] = '\0';
+			jw_object_string(jw, "name",  name);
+			jw_object_intmax(jw, "size", extsize);
+			jw_end(jw);
+		}
+
 		src_offset += 8;
 		src_offset += extsize;
+	}
+	if (jw) {
+		jw_end(jw);	/* extensions */
+		jw_end(jw);	/* end-of-index */
 	}
 	the_hash_algo->final_fn(hash, &c);
 	if (!hasheq(hash, (const unsigned char *)index))
@@ -3549,7 +3647,9 @@ static void write_eoie_extension(struct strbuf *sb, git_hash_ctx *eoie_context, 
 
 #define IEOT_VERSION	(1)
 
-static struct index_entry_offset_table *read_ieot_extension(const char *mmap, size_t mmap_size, size_t offset)
+static struct index_entry_offset_table *read_ieot_extension(
+	const char *mmap, size_t mmap_size,
+	size_t offset, struct json_writer *jw)
 {
 	const char *index = NULL;
 	uint32_t extsize, ext_version;
@@ -3585,6 +3685,12 @@ static struct index_entry_offset_table *read_ieot_extension(const char *mmap, si
 		error("invalid number of IEOT entries %d", nr);
 		return NULL;
 	}
+	if (jw) {
+		jw_object_inline_begin_object(jw, "index-entry-offsets");
+		jw_object_intmax(jw, "version", ext_version);
+		jw_object_intmax(jw, "ext-size", extsize);
+		jw_object_inline_begin_array(jw, "entries");
+	}
 	ieot = xmalloc(sizeof(struct index_entry_offset_table)
 		       + (nr * sizeof(struct index_entry_offset)));
 	ieot->nr = nr;
@@ -3593,6 +3699,17 @@ static struct index_entry_offset_table *read_ieot_extension(const char *mmap, si
 		index += sizeof(uint32_t);
 		ieot->entries[i].nr = get_be32(index);
 		index += sizeof(uint32_t);
+
+		if (jw) {
+			jw_array_inline_begin_object(jw);
+			jw_object_intmax(jw, "offset", ieot->entries[i].offset);
+			jw_object_intmax(jw, "count", ieot->entries[i].nr);
+			jw_end(jw);
+		}
+	}
+	if (jw) {
+		jw_end(jw);	/* entries */
+		jw_end(jw);	/* index-entry-offsets */
 	}
 
 	return ieot;

@@ -60,6 +60,11 @@ OPTIONS
 --stage::
 	Show staged contents' mode bits, object name and stage number in the output.
 
+--json::
+	Dump the entire index content in JSON format. This is for
+	debugging purposes and the JSON structure may change from time
+	to time.
+
 --directory::
 	If a whole directory is classified as "other", show just its
 	name (with a trailing slash) and not its whole contents.

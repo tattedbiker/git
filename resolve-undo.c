@@ -1,5 +1,6 @@
 #include "cache.h"
 #include "dir.h"
+#include "json-writer.h"
 #include "resolve-undo.h"
 #include "string-list.h"
 
@@ -49,7 +50,8 @@ void resolve_undo_write(struct strbuf *sb, struct string_list *resolve_undo)
 	}
 }
 
-struct string_list *resolve_undo_read(const char *data, unsigned long size)
+struct string_list *resolve_undo_read(const char *data, unsigned long size,
+				      struct json_writer *jw)
 {
 	struct string_list *resolve_undo;
 	size_t len;
@@ -59,6 +61,11 @@ struct string_list *resolve_undo_read(const char *data, unsigned long size)
 
 	resolve_undo = xcalloc(1, sizeof(*resolve_undo));
 	resolve_undo->strdup_strings = 1;
+	if (jw) {
+		jw_object_inline_begin_object(jw, "resolve-undo");
+		jw_object_intmax(jw, "ext-size", size);
+		jw_object_inline_begin_array(jw, "entries");
+	}
 
 	while (size) {
 		struct string_list_item *lost;
@@ -94,6 +101,33 @@ struct string_list *resolve_undo_read(const char *data, unsigned long size)
 			size -= rawsz;
 			data += rawsz;
 		}
+
+		if (jw) {
+			struct strbuf sb = STRBUF_INIT;
+
+			jw_array_inline_begin_object(jw);
+			jw_object_string(jw, "path", lost->string);
+
+			jw_object_inline_begin_array(jw, "mode");
+			for (i = 0; i < 3; i++) {
+				strbuf_addf(&sb, "%06o", ui->mode[i]);
+				jw_array_string(jw, sb.buf);
+				strbuf_reset(&sb);
+			}
+			jw_end(jw);
+
+			jw_object_inline_begin_array(jw, "oid");
+			for (i = 0; i < 3; i++)
+				jw_array_string(jw, oid_to_hex(&ui->oid[i]));
+			jw_end(jw);
+
+			jw_end(jw);
+			strbuf_release(&sb);
+		}
+	}
+	if (jw) {
+		jw_end(jw);	/* entries */
+		jw_end(jw);	/* resolve-undo */
 	}
 	return resolve_undo;
 
